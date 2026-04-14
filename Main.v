@@ -224,7 +224,7 @@ always @(posedge ddr_user_clk or negedge sys_rst_n) begin
         spi_read_enable <= 0;
         boot_uart_wr_en <= 0;
         spi_address <= 24'h10_00_00; 
-        boot_user_addr <= 27'd0;           
+        boot_user_addr <= 27'd0;            
         boot_ddr_cmd_en <= 0;
         boot_ddr_wr_data_en <= 0;
         boot_ddr_wr_data_end <= 0;
@@ -352,7 +352,7 @@ always @(posedge ddr_user_clk or negedge sys_rst_n) begin
         spi_read_enable <= 0;
         boot_uart_wr_en <= 0;
         spi_address <= 24'h10_00_00; 
-        boot_user_addr <= 27'd0;           
+        boot_user_addr <= 27'd0;            
         boot_ddr_cmd_en <= 0;
         boot_ddr_wr_data_en <= 0;
         boot_ddr_wr_data_end <= 0;
@@ -533,6 +533,9 @@ localparam C_PREFETCH_CLEANUP  = 6'd32;
 // --- NEW M STATES ---
 localparam C_EXEC_M_TYPE       = 6'd33;
 localparam C_WAIT_DIVISION     = 6'd34;
+localparam C_SETUP_M_TYPE      = 6'd35;
+
+localparam C_DDR_PREPARE_WRITE = 6'd36;
 
 
 reg [5:0]  state = C_DDR_WAIT_READ;        
@@ -602,9 +605,14 @@ reg [4:0]   dump_reg_idx = 0;
 // 8. M Extension for ALU 
 // ==============================================================================
 
-wire signed [32:0] mul_op1 = (funct3 == 3'b011) ? {1'b0, read1_data} : {read1_data[31], read1_data};
-wire signed [32:0] mul_op2 = (funct3 == 3'b011 || funct3 == 3'b010) ? {1'b0, read2_data} : {read2_data[31], read2_data};
-/*  funct3 == 000  unsigned unsigned lower 32
+reg [31:0] alu_op1 = 0;
+reg [31:0] alu_op2 = 0;
+
+wire signed [32:0] mul_op1 = (funct3 == 3'b011) ? {1'b0, alu_op1} : {alu_op1[31], alu_op1};
+wire signed [32:0] mul_op2 = (funct3 == 3'b011 || funct3 == 3'b010) ? {1'b0, alu_op2} : {alu_op2[31], alu_op2};
+
+
+/* funct3 == 000  unsigned unsigned lower 32
     funct3 == 001  signed signed upper 32
     funct3 == 010  signed unsigned upper 32
     funct3 == 011  unsigned unsigned upper 32
@@ -620,25 +628,25 @@ wire [31:0]quotient_s;
 
 // Unsigned Divider
 Integer_Division_Top_U divider_u(
-		.clk(ddr_user_clk), //input clk
-		.rstn(sys_rst_n), //input rstn
-		.dividend(read1_data), //input [31:0] dividend
-		.divisor(read2_data), //input [31:0] divisor
-		.remainder(remainder_u), //output [31:0] remainder
-		.quotient(quotient_u) //output [31:0] quotient
-	);
+        .clk(ddr_user_clk), //input clk
+        .rstn(sys_rst_n), //input rstn
+        .dividend(alu_op1), //input [31:0] dividend
+        .divisor(alu_op2), //input [31:0] divisor
+        .remainder(remainder_u), //output [31:0] remainder
+        .quotient(quotient_u) //output [31:0] quotient
+    );
 
 //Signed Divider
 Integer_Division_Top_S divider_s(
-		.clk(ddr_user_clk), //input clk
-		.rstn(sys_rst_n), //input rstn
-		.dividend(read1_data), //input [31:0] dividend
-		.divisor(read2_data), //input [31:0] divisor
-		.remainder(remainder_s), //output [31:0] remainder
-		.quotient(quotient_s) //output [31:0] quotient
-	);
+        .clk(ddr_user_clk), //input clk
+        .rstn(sys_rst_n), //input rstn
+        .dividend(alu_op1), //input [31:0] dividend
+        .divisor(alu_op2), //input [31:0] divisor
+        .remainder(remainder_s), //output [31:0] remainder
+        .quotient(quotient_s) //output [31:0] quotient
+    );
 
-reg [3:0] div_wait_cnt;
+reg [5:0] div_wait_cnt;
 
 always @(posedge ddr_user_clk or negedge sys_rst_n) begin
     if (!sys_rst_n) begin        
@@ -660,6 +668,8 @@ always @(posedge ddr_user_clk or negedge sys_rst_n) begin
         dump_reg_idx <= 5'd0;
         pending_exec_state <= 0;
         div_wait_cnt <= 0;
+        alu_op1 <= 0;
+        alu_op2 <= 0;
         
         // Reset Queue
         rq_head <= 0; rq_tail <= 0; rq_is_data <= 0;
@@ -825,6 +835,9 @@ always @(posedge ddr_user_clk or negedge sys_rst_n) begin
                 
                 is_instruction_fetch <= 0; 
                 return_state <= C_EXECUTE; 
+                
+                // IMPORTANT: alu_op1/2 CANNOT be latched here because read1/2_data are not updated yet!
+                // They are safely latched in C_ROUTE_R_TYPE and C_REG_FETCH_WAIT.
 
                 case (current_instr[6:0])
                     7'b0110011: state <= C_ROUTE_R_TYPE; 
@@ -847,9 +860,12 @@ always @(posedge ddr_user_clk or negedge sys_rst_n) begin
             end
 
             C_ROUTE_R_TYPE: begin
+                alu_op1 <= read1_data;
+                alu_op2 <= read2_data;
+
                 if (funct7 == 7'b0000001) begin
                     // This is a Multiplication or Division Instruction!
-                    state <= C_EXEC_M_TYPE; 
+                    state <= C_SETUP_M_TYPE; 
                 end else if (funct7 == 7'b0000000 || funct7 == 7'b0100000) begin
                     // Standard Base Integer Math (ADD, SUB, XOR, etc.)
                     state <= C_EXEC_R_TYPE; 
@@ -857,6 +873,10 @@ always @(posedge ddr_user_clk or negedge sys_rst_n) begin
                     // Truly illegal funct7
                     state <= C_HALT;
                 end
+            end
+
+            C_SETUP_M_TYPE: begin
+                state <= C_EXEC_M_TYPE; // Just waste 1 cycle waiting for full_mul_result to stabilize
             end
 
             C_EXEC_M_TYPE: begin
@@ -885,38 +905,38 @@ always @(posedge ddr_user_clk or negedge sys_rst_n) begin
             end
 
             C_WAIT_DIVISION: begin
-                if (div_wait_cnt >= 10) begin
+                if (div_wait_cnt >= 35) begin
                     
                     // RISC-V Division Edge Case Overrides
                     case (funct3) 
                         3'b100: begin // DIV (Signed Quotient)
-                            if (read2_data == 32'd0) 
+                            if (alu_op2 == 32'd0) 
                                 write_data <= 32'hFFFFFFFF; // Divide by zero
-                            else if (read1_data == 32'h80000000 && read2_data == 32'hFFFFFFFF) 
+                            else if (alu_op1 == 32'h80000000 && alu_op2 == 32'hFFFFFFFF) 
                                 write_data <= 32'h80000000; // Signed Overflow
                             else 
                                 write_data <= quotient_s;   // Normal operation
                         end
                         
                         3'b101: begin // DIVU (Unsigned Quotient)
-                            if (read2_data == 32'd0) 
+                            if (alu_op2 == 32'd0) 
                                 write_data <= 32'hFFFFFFFF; // Divide by zero
                             else 
                                 write_data <= quotient_u;   // Normal operation
                         end
 
                         3'b110: begin // REM (Signed Remainder)
-                            if (read2_data == 32'd0) 
-                                write_data <= read1_data;   // Divide by zero
-                            else if (read1_data == 32'h80000000 && read2_data == 32'hFFFFFFFF) 
+                            if (alu_op2 == 32'd0) 
+                                write_data <= alu_op1;   // Divide by zero
+                            else if (alu_op1 == 32'h80000000 && alu_op2 == 32'hFFFFFFFF) 
                                 write_data <= 32'd0;        // Signed Overflow
                             else 
                                 write_data <= remainder_s;  // Normal operation
                         end
 
                         3'b111: begin // REMU (Unsigned Remainder)
-                            if (read2_data == 32'd0) 
-                                write_data <= read1_data;   // Divide by zero
+                            if (alu_op2 == 32'd0) 
+                                write_data <= alu_op1;   // Divide by zero
                             else 
                                 write_data <= remainder_u;  // Normal operation
                         end
@@ -930,6 +950,8 @@ always @(posedge ddr_user_clk or negedge sys_rst_n) begin
             end
 
             C_REG_FETCH_WAIT: begin
+                alu_op1 <= read1_data;
+                alu_op2 <= read2_data;
                 state <= pending_exec_state; 
             end
 
@@ -937,21 +959,21 @@ always @(posedge ddr_user_clk or negedge sys_rst_n) begin
                 write_enable <= 1; 
                 case (funct3)
                     3'b000: begin
-                        if (funct7 == 7'b0100000) write_data <= read1_data - read2_data; 
-                        else write_data <= read1_data + read2_data; 
+                        if (funct7 == 7'b0100000) write_data <= alu_op1 - alu_op2; 
+                        else write_data <= alu_op1 + alu_op2; 
                     end
-                    3'b001: write_data <= read1_data << read2_data[4:0]; 
-                    3'b010: write_data <= ($signed(read1_data) < $signed(read2_data)) ? 32'd1 : 32'd0; 
-                    3'b011: write_data <= (read1_data < read2_data) ? 32'd1 : 32'd0; 
-                    3'b100: write_data <= read1_data ^ read2_data; 
+                    3'b001: write_data <= alu_op1 << alu_op2[4:0]; 
+                    3'b010: write_data <= ($signed(alu_op1) < $signed(alu_op2)) ? 32'd1 : 32'd0; 
+                    3'b011: write_data <= (alu_op1 < alu_op2) ? 32'd1 : 32'd0; 
+                    3'b100: write_data <= alu_op1 ^ alu_op2; 
                     3'b101: begin
                         if (funct7 == 7'b0100000) 
-                            write_data <= $signed(read1_data) >>> read2_data[4:0]; 
+                            write_data <= $signed(alu_op1) >>> alu_op2[4:0]; 
                         else 
-                            write_data <= read1_data >> read2_data[4:0]; 
+                            write_data <= alu_op1 >> alu_op2[4:0]; 
                     end
-                    3'b110: write_data <= read1_data | read2_data; 
-                    3'b111: write_data <= read1_data & read2_data; 
+                    3'b110: write_data <= alu_op1 | alu_op2; 
+                    3'b111: write_data <= alu_op1 & alu_op2; 
                 endcase
                 state <= return_state; 
             end
@@ -959,64 +981,64 @@ always @(posedge ddr_user_clk or negedge sys_rst_n) begin
             C_EXEC_I_TYPE: begin
                 write_enable <= 1; 
                 case (funct3)
-                    3'b000: write_data <= read1_data + imm_i; 
-                    3'b001: write_data <= read1_data << imm_i[4:0]; 
-                    3'b010: write_data <= ($signed(read1_data) < $signed(imm_i)) ? 32'd1 : 32'd0; 
-                    3'b011: write_data <= (read1_data < imm_i) ? 32'd1 : 32'd0; 
-                    3'b100: write_data <= read1_data ^ imm_i; 
+                    3'b000: write_data <= alu_op1 + imm_i; 
+                    3'b001: write_data <= alu_op1 << imm_i[4:0]; 
+                    3'b010: write_data <= ($signed(alu_op1) < $signed(imm_i)) ? 32'd1 : 32'd0; 
+                    3'b011: write_data <= (alu_op1 < imm_i) ? 32'd1 : 32'd0; 
+                    3'b100: write_data <= alu_op1 ^ imm_i; 
                     3'b101: begin
                         if (current_instr[30] == 1'b1) 
-                            write_data <= $signed(read1_data) >>> imm_i[4:0]; 
+                            write_data <= $signed(alu_op1) >>> imm_i[4:0]; 
                         else 
-                            write_data <= read1_data >> imm_i[4:0]; 
+                            write_data <= alu_op1 >> imm_i[4:0]; 
                     end
-                    3'b110: write_data <= read1_data | imm_i; 
-                    3'b111: write_data <= read1_data & imm_i; 
+                    3'b110: write_data <= alu_op1 | imm_i; 
+                    3'b111: write_data <= alu_op1 & imm_i; 
                 endcase
                 state <= return_state; 
             end
 
             C_EXEC_LOAD: begin
-                data_addr <= read1_data + imm_i; 
+                data_addr <= alu_op1 + imm_i; 
                 is_instruction_fetch <= 0; 
                 state <= C_DDR_WAIT_READ;  
             end
 
             C_EXEC_STORE: begin
-                data_addr <= read1_data + imm_s; 
-                cpu_store_data <= read2_data; 
-                state <= C_DDR_WAIT_WRITE; 
+                data_addr <= alu_op1 + imm_s; 
+                cpu_store_data <= alu_op2; 
+                state <= C_DDR_PREPARE_WRITE; 
             end
 
             C_EXEC_BRANCH: begin
                 state <= return_state; 
                 case (funct3)
-                    3'b000: if (read1_data == read2_data) begin
+                    3'b000: if (alu_op1 == alu_op2) begin
                         program_counter <= program_counter + imm_b;
                         is_instruction_fetch <= 1; 
                         state <= C_DDR_WAIT_READ; 
                     end
-                    3'b001: if (read1_data != read2_data) begin
+                    3'b001: if (alu_op1 != alu_op2) begin
                         program_counter <= program_counter + imm_b;
                         is_instruction_fetch <= 1; 
                         state <= C_DDR_WAIT_READ; 
                     end
-                    3'b100: if ($signed(read1_data) < $signed(read2_data)) begin
+                    3'b100: if ($signed(alu_op1) < $signed(alu_op2)) begin
                         program_counter <= program_counter + imm_b;
                         is_instruction_fetch <= 1; 
                         state <= C_DDR_WAIT_READ; 
                     end
-                    3'b101: if ($signed(read1_data) >= $signed(read2_data)) begin
+                    3'b101: if ($signed(alu_op1) >= $signed(alu_op2)) begin
                         program_counter <= program_counter + imm_b;
                         is_instruction_fetch <= 1; 
                         state <= C_DDR_WAIT_READ; 
                     end
-                    3'b110: if (read1_data < read2_data) begin
+                    3'b110: if (alu_op1 < alu_op2) begin
                         program_counter <= program_counter + imm_b;
                         is_instruction_fetch <= 1; 
                         state <= C_DDR_WAIT_READ; 
                     end
-                    3'b111: if (read1_data >= read2_data) begin
+                    3'b111: if (alu_op1 >= alu_op2) begin
                         program_counter <= program_counter + imm_b;
                         is_instruction_fetch <= 1; 
                         state <= C_DDR_WAIT_READ; 
@@ -1035,7 +1057,7 @@ always @(posedge ddr_user_clk or negedge sys_rst_n) begin
             C_EXEC_JALR: begin
                 write_data <= program_counter + 32'd4;
                 write_enable <= 1;
-                program_counter <= (read1_data + imm_i) & 32'hFFFF_FFFE;
+                program_counter <= (alu_op1 + imm_i) & 32'hFFFF_FFFE;
                 is_instruction_fetch <= 1; 
                 state <= C_DDR_WAIT_READ; 
             end
@@ -1180,28 +1202,26 @@ always @(posedge ddr_user_clk or negedge sys_rst_n) begin
             end
 
             // ========================================================
-            // STORE STATE (BYTE/HALFWORD/WORD MASKS) 
+            // STORE STATE 1: CALCULATE AND REGISTER
             // ========================================================
-            C_DDR_WAIT_WRITE: begin
+            C_DDR_PREPARE_WRITE: begin
                 if (data_addr >= 32'h40000000) begin
+                    // It is an I/O operation (VGA, UART), skip DDR math!
                     state <= C_IO_WRITE;
-                end
-                else if (ddr_cmd_ready && ddr_wr_data_rdy) begin
-                    cpu_ddr_cmd <= 3'b000; 
-                    cpu_ddr_cmd_en <= 1;
+                end else begin
+                    // 1. Calculate and register the target DDR address
                     cpu_user_addr <= {data_addr[27:4], 3'b000}; 
                     
-                    // 1. Copy the target data to all possible byte-lanes (Dynamic Payload)
+                    // 2. Calculate the 32-bit active payload (Dynamic Payload)
                     case (funct3[1:0])
                         2'b00: active_payload = {4{cpu_store_data[7:0]}}; // SB 
                         2'b01: active_payload = {2{cpu_store_data[7:0], cpu_store_data[15:8]}}; // SH 
                         2'b10: active_payload = {cpu_store_data[7:0], cpu_store_data[15:8], cpu_store_data[23:16], cpu_store_data[31:24]}; // SW
                         default: active_payload = {cpu_store_data[7:0], cpu_store_data[15:8], cpu_store_data[23:16], cpu_store_data[31:24]};
                     endcase
-                    
                     cpu_ddr_wr_data <= {4{active_payload}}; 
 
-                    // 2. Generate the 4-bit Word Mask
+                    // 3. Generate the 4-bit Base Word Mask
                     case (funct3[1:0])
                         2'b00: // SB (Store Byte)
                             case (data_addr[1:0])
@@ -1219,7 +1239,7 @@ always @(posedge ddr_user_clk or negedge sys_rst_n) begin
                             base_mask = 4'b0000;
                     endcase
 
-                    // 3. Shift the 4-bit mask into the gigantic 16-bit DDR3 mask
+                    // 4. Shift the 4-bit mask into the gigantic 16-bit DDR3 mask
                     case (data_addr[3:2])
                         2'b00: cpu_ddr_wr_data_mask <= {base_mask, 12'hFFF}; 
                         2'b01: cpu_ddr_wr_data_mask <= {4'hF, base_mask, 8'hFF}; 
@@ -1227,8 +1247,27 @@ always @(posedge ddr_user_clk or negedge sys_rst_n) begin
                         2'b11: cpu_ddr_wr_data_mask <= {12'hFFF, base_mask}; 
                     endcase
 
+                    // Ensure command signals are OFF while calculating
+                    cpu_ddr_cmd_en <= 0;
+                    cpu_ddr_wr_data_en <= 0;
+                    cpu_ddr_wr_data_end <= 0;
+
+                    // Data is now safely in registers. Move to the waiting state.
+                    state <= C_DDR_WAIT_WRITE;
+                end
+            end
+
+            // ========================================================
+            // STORE STATE 2: ASSERT SIGNALS TO DDR CONTROLLER
+            // ========================================================
+            C_DDR_WAIT_WRITE: begin
+                if (ddr_cmd_ready && ddr_wr_data_rdy) begin
+                    cpu_ddr_cmd <= 3'b000; 
+                    
+                    cpu_ddr_cmd_en <= 1;
                     cpu_ddr_wr_data_en <= 1;
                     cpu_ddr_wr_data_end <= 1;
+                    
                     state <= C_DDR_WRITE; 
                 end       
             end
@@ -1254,6 +1293,7 @@ always @(posedge ddr_user_clk or negedge sys_rst_n) begin
             end
 
             C_HALT_FETCH: begin
+                // Keeps read1_data because it is reading straight from the Register SRAM
                 cpu_uart_msg <= read1_data; 
                 cpu_byte_idx <= 0;
                 return_state <= C_HALT_NEXT; 
@@ -1296,7 +1336,9 @@ always @(posedge ddr_user_clk or negedge sys_rst_n) begin
         dump_reg_idx <= 5'd0;
         pending_exec_state <= 0;
         cpu_done <= 0; 
-        
+        div_wait_cnt <= 0;
+        alu_op1 <= 0;
+        alu_op2 <= 0;
         rq_head <= 0; rq_tail <= 0; rq_is_data <= 0;
         pf_valid <= 0; dmem_valid <= 0; pf_ready_addr <= 27'h7FFFFFF;
     end
