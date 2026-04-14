@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE gowin-synthesis-project>
+<Project>
+    <Version>beta</Version>
+    <Device id="GW2A-18C" package="PBGA256" speed="8" partNumber="GW2A-LV18PG256C8/I7"/>
+    <FileList>
+        <File path="D:/Gowin_FPGA/Gowin_V1.9.11.01_Education_x64/IDE/ipcore/Integer_Division/data/integer_division_wrap.v" type="verilog"/>
+        <File path="D:/Gowin_FPGA/Gowin_V1.9.11.01_Education_x64/IDE/ipcore/Integer_Division/data/integer_division.v" type="verilog"/>
+    </FileList>
+    <OptionList>
+        <Option type="disable_insert_pad" value="1"/>
+        <Option type="include_path" value="D:/Gowin_FPGA/Gowin_V1.9.11.01_Education_x64/IDE/ipcore/Integer_Division/data"/>
+        <Option type="include_path" value="D:/Gowin_FPGA/Projects/32Bit_Computer/src/integer_division_signed/temp/integer_division"/>
+        <Option type="output_file" value="integer_division_signed.vg"/>
+        <Option type="output_template" value="integer_division_signed_tmp.v"/>
+        <Option type="ram_balance" value="1"/>
+        <Option type="ram_rw_check" value="1"/>
+        <Option type="vcc" value="1.0"/>
+        <Option type="vccx" value="3.3"/>
+        <Option type="verilog_language" value="sysv-2017"/>
+    </OptionList>
+</Project>
