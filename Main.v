@@ -886,23 +886,42 @@ always @(posedge ddr_user_clk or negedge sys_rst_n) begin
 
             C_WAIT_DIVISION: begin
                 if (div_wait_cnt >= 10) begin
+                    
+                    // RISC-V Division Edge Case Overrides
                     case (funct3) 
-                        3'b100: begin
-                            write_data <= quotient_s;
+                        3'b100: begin // DIV (Signed Quotient)
+                            if (read2_data == 32'd0) 
+                                write_data <= 32'hFFFFFFFF; // Divide by zero
+                            else if (read1_data == 32'h80000000 && read2_data == 32'hFFFFFFFF) 
+                                write_data <= 32'h80000000; // Signed Overflow
+                            else 
+                                write_data <= quotient_s;   // Normal operation
                         end
                         
-                        3'b101: begin
-                            write_data <= quotient_u;
+                        3'b101: begin // DIVU (Unsigned Quotient)
+                            if (read2_data == 32'd0) 
+                                write_data <= 32'hFFFFFFFF; // Divide by zero
+                            else 
+                                write_data <= quotient_u;   // Normal operation
                         end
 
-                        3'b110: begin
-                            write_data <= remainder_s;
+                        3'b110: begin // REM (Signed Remainder)
+                            if (read2_data == 32'd0) 
+                                write_data <= read1_data;   // Divide by zero
+                            else if (read1_data == 32'h80000000 && read2_data == 32'hFFFFFFFF) 
+                                write_data <= 32'd0;        // Signed Overflow
+                            else 
+                                write_data <= remainder_s;  // Normal operation
                         end
 
-                        3'b111: begin
-                            write_data <= remainder_u;
+                        3'b111: begin // REMU (Unsigned Remainder)
+                            if (read2_data == 32'd0) 
+                                write_data <= read1_data;   // Divide by zero
+                            else 
+                                write_data <= remainder_u;  // Normal operation
                         end
                     endcase
+                    
                     write_enable <= 1;
                     state <= return_state;
                 end else begin
